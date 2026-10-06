@@ -8,6 +8,14 @@ Research companion to [Jeffy](https://github.com/nicobrenner/jeffy) — explorin
 
 ## Key findings
 
+### Cross-lingual agreement reveals encoder structure
+
+We feed identical inputs to all 51 per-language classifiers and measure pairwise agreement rates, creating a 51×51 matrix that probes how the shared embedding space encodes cross-lingual semantics.
+
+![Agreement heatmap](figures/agreement_heatmap.png)
+
+Mean off-diagonal agreement: 72.1%. The Ward clustering surfaces clear structure: low-resource languages with unique scripts (Icelandic, Amharic, Bengali) form a cold cluster in the top-left, high-resource European languages form a warm block in the center, and outliers (Javanese, Filipino, Welsh, Swahili) sit isolated at the bottom-right. Agreement correlates with language family proximity and encoder pretraining data availability. This is a novel evaluation methodology — classifier disagreement patterns reveal encoder biases invisible to standard per-language accuracy metrics.
+
 ### 75.6% mean accuracy across 51 languages at ~100KB per classifier
 
 We train one logistic regression per language on top of a single frozen multilingual encoder (`paraphrase-multilingual-MiniLM-L12-v2`, 384-dim). All 51 classifiers train in 22 minutes on commodity CPU. Each weighs ~100KB — approximately **10,000× smaller** than fine-tuned XLM-R baselines (~1 GB per model).
@@ -41,14 +49,6 @@ Adding TF-IDF features alongside embeddings produces dramatic improvements for t
 | German | 75.1% | — | (not tested) |
 
 The benefit is largest where the encoder has weakest coverage — exactly where it's most needed.
-
-### Cross-lingual agreement reveals encoder structure
-
-We feed identical inputs to all 51 classifiers and measure pairwise agreement rates, creating a 51×51 matrix that probes how the shared embedding space encodes cross-lingual semantics.
-
-![Agreement heatmap](figures/agreement_heatmap.png)
-
-Mean off-diagonal agreement: 72.1%. Agreement clusters by language family and correlates with encoder pretraining data. This is a novel evaluation methodology — classifier disagreement patterns reveal encoder biases invisible to standard per-language accuracy.
 
 ## Architecture
 
@@ -103,7 +103,7 @@ python experiments/distillation_poc.py           # Knowledge distillation PoC
 ```
 data/           Experiment CSVs and matrices
 experiments/    Reproducible Python scripts
-figures/        Generated charts (accuracy bars, encoder comparison, agreement heatmap)
+figures/        Generated charts (agreement heatmap, accuracy bars, encoder comparison)
 paper/          Paper outline (EMNLP 2027) and blog outline
 results/        Analysis summaries and notes
 ```
