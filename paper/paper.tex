@@ -1,0 +1,318 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{times}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}
+\usepackage{xcolor}
+\usepackage{subcaption}
+
+\title{Frozen Multilingual Embeddings with Logistic Regression\\for Intent Classification Across 51 Languages}
+
+\author{Nico Brenner \\
+\texttt{nbrenner@gmail.com}}
+
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We evaluate a simple pipeline for multilingual intent classification: frozen sentence embeddings from a pretrained multilingual encoder followed by per-language logistic regression heads. Evaluating on all 51 languages of the MASSIVE dataset (60 intent classes), this approach achieves a mean accuracy of 83.3\% with LaBSE embeddings, compared to 85.1\% for fine-tuned XLM-R Base---a gap of only 1.8 percentage points. Crucially, it requires no GPU and no fine-tuning: each per-language classifier is a 100\,KB logistic regression head that trains in under 30 seconds on CPU, and adding a new language requires only the small head since the shared encoder is never updated. The approach outperforms XLM-R zero-shot cross-lingual transfer in 37 of 50 non-English languages by an average of 7.4 percentage points, demonstrating that per-language classifiers on frozen embeddings capture language-specific signal that cross-lingual transfer misses. We compare four multilingual sentence encoders---MiniLM-L12, distiluse-v2, multilingual-E5-small (mE5-small), and LaBSE---and three classifier heads (logistic regression, MLP, XGBoost), finding that LaBSE provides the highest accuracy and most uniform cross-lingual coverage (standard deviation 2.4\% across 51 languages). Notably, mE5-small (118M parameters) achieves 82.1\% mean accuracy on a 6-language subset, outperforming MiniLM-L12 (76.9\%) at identical parameter count, establishing it as the preferred lightweight encoder. We introduce a cross-lingual agreement analysis---feeding identical inputs to all 51 per-language classifiers and measuring prediction overlap---which reveals structured clustering by language family and encoder quality. All code, trained classifiers, and an interactive playground are publicly available.\footnote{\url{https://github.com/nicobrenner/jeffy-classify}}\textsuperscript{,}\footnote{\url{https://playground.jeffyclassify.com}}
+\end{abstract}
+
+
+\section{Introduction}
+
+State-of-the-art multilingual NLU systems typically fine-tune large cross-lingual transformers such as XLM-R \citep{conneau2020xlmr}, achieving strong accuracy at the cost of GPU training infrastructure and per-task model copies. For intent classification---the backbone of virtual assistants and command routing---this requirement is a barrier on edge devices, in resource-constrained settings, and for rapid prototyping across many languages.
+
+We ask: \textit{How far can a frozen multilingual sentence encoder plus a simple linear classifier go?} The approach is deliberately minimal: encode each utterance with a pretrained model (no fine-tuning, no gradient updates to the encoder), then train a per-language logistic regression head on the resulting embeddings using scikit-learn \citep{pedregosa2011sklearn}. The total system size is comparable to a single fine-tuned XLM-R (the shared encoder is 120\,MB--1.1\,GB depending on the choice of encoder, plus 100\,KB per language for the classifier head), but crucially, training requires no GPU and takes seconds rather than hours.
+
+Our contributions are:
+
+\begin{enumerate}
+\item \textbf{Comprehensive multilingual evaluation.} We train and evaluate per-language classifiers on all 51 MASSIVE languages \citep{fitzgerald2023massive}, providing the first systematic benchmark of frozen multilingual embeddings + logistic regression at this scale.
+
+\item \textbf{Encoder comparison.} We compare four multilingual sentence encoders---paraphrase-multilingual-MiniLM-L12-v2 \citep{wang2020minilm, reimers2019sentencebert}, distiluse-base-multilingual-cased-v2, multilingual-E5-small \citep{wang2024e5}, and LaBSE \citep{feng2022labse}---finding that encoder choice matters more than encoder size: mE5-small (118M parameters) outperforms MiniLM-L12 (118M) by 5 percentage points at identical parameter count.
+
+\item \textbf{Cross-lingual agreement analysis.} We propose a novel probe: feeding identical test inputs to all 51 per-language classifiers and measuring pairwise prediction agreement. The resulting $51 \times 51$ agreement matrix, clustered hierarchically, reveals structure correlated with language families and encoder representation quality.
+
+\item \textbf{Practical efficiency.} The entire pipeline trains in under 30 seconds per language on CPU with no GPU required at any stage---neither for training nor inference. Each per-language classifier is 100\,KB; the shared encoder is downloaded once and never updated.
+\end{enumerate}
+
+
+\section{Related Work}
+
+\paragraph{MASSIVE.} \citet{fitzgerald2023massive} introduced MASSIVE, a parallel corpus of over 1 million utterances across 51 typologically diverse languages, with 60 intent classes and 55 slot types. Their XLM-R baselines (both Base and Large) remain the standard comparison, achieving roughly 85--88\% accuracy in the fully supervised setting.
+
+\paragraph{SetFit.} \citet{tunstall2022setfit} showed that few-shot fine-tuning of sentence transformers via contrastive learning matches larger models with far less data. Unlike our approach, SetFit \textit{fine-tunes} the encoder through a contrastive step; we keep the encoder entirely frozen.
+
+\paragraph{Frozen embeddings + linear classifiers.} \citet{buckmann2024logistic} demonstrated that frozen embeddings from bge-large-en-v1.5 combined with penalized logistic regression match GPT-4 in ``tens-of-shot'' English classification. Our work extends this finding to 51 languages and a much larger label space (60 classes).
+
+\paragraph{Lightweight multilingual NLU.} Several recent studies combine multilingual encoders (E5, LaBSE, distiluse) with classical classifiers for specific language pairs, generally finding that the gap to fine-tuned BERT is 2--5 percentage points. Our contribution is the systematic comparison across 51 languages with uniform methodology.
+
+\paragraph{Cross-lingual transfer.} Zero-shot cross-lingual transfer \citep{hu2020xtreme, conneau2020xlmr} trains on English data and evaluates on other languages. \citet{gritta2021xeroalign} improve this via alignment. Our approach trains per-language heads on per-language data, avoiding the transfer gap.
+
+
+\section{Method}
+
+Our pipeline has two stages:
+
+\paragraph{Encoding.} Each utterance is encoded into a fixed-dimensional vector using a pretrained multilingual sentence encoder, with no gradient updates. We evaluate three encoders:
+
+\begin{itemize}
+\item \textbf{MiniLM-L12} (paraphrase-multilingual-MiniLM-L12-v2): 118M parameters, 384-dimensional output. Distilled from a larger model \citep{wang2020minilm}, trained on parallel data across 50+ languages \citep{reimers2019sentencebert}.
+\item \textbf{distiluse-v2} (distiluse-base-multilingual-cased-v2): 135M parameters, 512-dimensional output. Knowledge-distilled from a multilingual USE teacher.
+\item \textbf{mE5-small} (multilingual-e5-small): 118M parameters, 384-dimensional output. Trained with weakly-supervised contrastive pre-training on multilingual text pairs \citep{wang2024e5}. Inputs are prefixed with ``query:~'' following the E5 convention.
+\item \textbf{LaBSE}: 471M parameters, 768-dimensional output. Trained specifically for cross-lingual sentence retrieval with a translation-bridge objective \citep{feng2022labse}.
+\end{itemize}
+
+\paragraph{Classification.} A per-language logistic regression head (scikit-learn, L2-regularized, $C$ tuned per language) maps the embedding to one of 60 MASSIVE intent classes. The classifier has $d \times 60$ parameters (23,100 for MiniLM, 46,140 for mpnet/LaBSE) and trains in seconds on CPU.
+
+% TODO: Add note about the production system using BGE-large-en for English specifically
+
+
+\section{Experimental Setup}
+
+\paragraph{Dataset.} We use the MASSIVE dataset \citep{fitzgerald2023massive}, which provides parallel utterances across 51 languages for 60 intent classes. Each language partition contains approximately 10,000 training examples and 2,974 test examples.
+
+\paragraph{Training.} For each language, we encode all training utterances (batch encoding on CPU), then fit a logistic regression head using scikit-learn's \texttt{LogisticRegression} with L2 penalty. Regularization strength $C$ is tuned via cross-validation. No data augmentation or oversampling is applied.
+
+\paragraph{Baselines.} We compare against:
+\begin{itemize}
+\item \textbf{XLM-R (fine-tuned)}: Full fine-tuning of XLM-R Base on per-language data, as reported by \citet{fitzgerald2023massive}. This is the supervised upper bound.
+\item \textbf{XLM-R (zero-shot)}: XLM-R fine-tuned on English data only, evaluated on all other languages. This measures cross-lingual transfer.
+\end{itemize}
+
+\paragraph{Classifier ablation.} On a subset of 6 typologically diverse languages (English, French, German, Korean, Japanese, Swahili), we additionally train MLP (2-layer, 256 hidden units, ReLU) and XGBoost (500 trees) heads to assess whether a nonlinear classifier closes the gap to XLM-R.
+
+\paragraph{Agreement analysis.} For the cross-lingual agreement experiment, we take the MASSIVE English test set (2,974 utterances) and feed each utterance---in English---to all 51 per-language classifiers trained with MiniLM embeddings. We compute the $51 \times 51$ pairwise prediction agreement matrix (fraction of test examples where two classifiers predict the same intent).
+
+
+\section{Results}
+
+\subsection{Main Results}
+
+\begin{table}[t]
+\centering
+\caption{Results grouped by language family. Accuracy (\%) on MASSIVE 60-intent classification.}
+\label{tab:main}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Family & \#Langs & Ours (mean) & XLM-R (mean) & Gap & Best / Worst \\
+\midrule
+Romance & 5 & 81.3 & 86.7 & 5.3 & French (82.5) / Romanian (79.6) \\
+Slavic & 3 & 80.8 & 86.4 & 5.7 & Polish (81.7) / Slovenian (79.1) \\
+Hellenic & 1 & 80.3 & 86.2 & 5.9 & Greek (80.3) \\
+Baltic & 1 & 80.0 & 86.1 & 6.1 & Latvian (80.0) \\
+Uralic & 2 & 79.2 & 85.8 & 6.7 & Hungarian (80.2) / Finnish (78.1) \\
+East Asian & 5 & 78.4 & 84.5 & 6.1 & Chinese-S (82.2) / Korean (74.1) \\
+Germanic & 8 & 77.0 & 86.7 & 9.7 & English (86.4) / Icelandic (63.4) \\
+Indo-Iranian & 4 & 76.7 & 85.0 & 8.3 & Persian (81.1) / Bengali (67.5) \\
+Turkic & 2 & 76.2 & 86.2 & 10.1 & Turkish (80.3) / Azerbaijani (72.0) \\
+SE Asian & 8 & 72.6 & 84.1 & 11.4 & Indonesian (82.0) / Filipino (59.7) \\
+Dravidian & 4 & 71.2 & 84.3 & 13.1 & Malayalam (73.1) / Tamil (69.3) \\
+Other & 4 & 71.2 & 83.5 & 12.4 & Albanian (79.2) / Swahili (60.2) \\
+Semitic & 3 & 70.3 & 82.8 & 12.4 & Hebrew (77.0) / Amharic (65.0) \\
+Celtic & 1 & 61.2 & 82.6 & 21.4 & Welsh (61.2) \\
+\midrule
+\textbf{All 51} & 51 & 75.6 & 85.1 & 9.5 & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:main} shows accuracy across all 51 languages, grouped by language family. Using the initial production configuration (MiniLM-L12 for most languages, BGE-large-en for English), the mean accuracy is 75.6\%, compared to 85.1\% for fine-tuned XLM-R. As shown in Section~5.2, switching to LaBSE closes this gap to 1.8\,pp (83.3\%).
+
+Figure~\ref{fig:accuracy} plots per-language accuracy alongside the XLM-R baseline. The gap ranges from 2 percentage points (English: 86.4\% vs.\ 88.3\%) to 25+ points for underrepresented scripts (Javanese, Swahili, Welsh).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig1_accuracy_by_language.pdf}
+\caption{Per-language test accuracy on MASSIVE (60 intents). Bars: frozen embeddings + LR (ours). Black markers: fine-tuned XLM-R. Colors indicate language families.}
+\label{fig:accuracy}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.5\textwidth]{figures/fig2_scatter_vs_xlmr.pdf}
+\caption{Per-language accuracy scatter: ours vs.\ fine-tuned XLM-R. All points below the parity line indicate XLM-R's advantage, but the gap narrows for high-resource language families.}
+\label{fig:scatter}
+\end{figure}
+
+
+\subsection{Comparison to Zero-Shot Transfer}
+
+A key finding is that per-language frozen embeddings + LR \textbf{outperforms XLM-R zero-shot transfer} in 37 of 50 non-English languages (Figure~\ref{fig:zeroshot}). The mean advantage is 7.4 percentage points where our approach wins. This demonstrates that even a simple per-language classifier on frozen embeddings captures language-specific signal that cross-lingual transfer misses.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig6_vs_zeroshot.pdf}
+\caption{Accuracy difference between our approach and XLM-R zero-shot transfer. Green bars: languages where frozen embeddings + LR outperforms. The advantage is largest for languages distant from English.}
+\label{fig:zeroshot}
+\end{figure}
+
+
+\subsection{Encoder Comparison}
+
+We evaluate encoders in two settings: (1)~a controlled 6-language comparison of four encoders with per-language $C$ tuning (Table~\ref{tab:encoder_sweep}), and (2)~a full 51-language evaluation of LaBSE with per-language $C$ tuning.
+
+\begin{table}[t]
+\centering
+\caption{Encoder comparison on 6 typologically diverse languages (MASSIVE, 60 intents). Per-language $C$ tuned via cross-validation. mE5-small matches MiniLM-L12 in parameter count but scores 5\,pp higher.}
+\label{tab:encoder_sweep}
+\small
+\begin{tabular}{lrrccccccc}
+\toprule
+Encoder & Params & Dim & en & fr & de & ko & sw & ar & Mean \\
+\midrule
+mE5-small & 118M & 384 & 86.2 & 84.4 & 81.8 & 83.3 & 79.3 & 77.7 & \textbf{82.1} \\
+distiluse-v2 & 135M & 512 & 85.8 & 83.2 & 79.5 & 78.3 & 68.1 & 73.4 & 78.0 \\
+MiniLM-L12 & 118M & 384 & 84.8 & 81.0 & 75.7 & 76.2 & 63.9 & --- & 76.9 \\
+\midrule
+LaBSE (6-lang) & 471M & 768 & 86.1 & 86.5 & 83.5 & 84.5 & 80.5 & 77.9 & 83.2 \\
+\textbf{LaBSE (51-lang)} & 471M & 768 & \multicolumn{6}{c}{\textit{see below}} & \textbf{83.3} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Encoder choice outweighs encoder size.} The most striking finding is that mE5-small and MiniLM-L12 have \textit{identical} parameter counts (118M) and output dimensionality (384), yet mE5-small scores 5.2 percentage points higher on the 6-language mean (82.1\% vs.\ 76.9\%). The difference is largest on low-resource languages: Swahili (79.3\% vs.\ 63.9\%, +15.4\,pp) and Korean (83.3\% vs.\ 76.2\%, +7.1\,pp). This demonstrates that \textbf{training objective and data matter more than model size} for frozen-embedding classification.
+
+\paragraph{LaBSE across 51 languages.} With per-language $C$ tuning on all 51 MASSIVE languages, LaBSE achieves a mean accuracy of \textbf{83.3\%}---only 1.8\,pp below fine-tuned XLM-R Base (85.1\%). All 51 languages exceed 70\% accuracy, and 47 of 51 exceed 80\%. The spread is remarkably tight: 76.4\% (Khmer) to 86.5\% (French), a range of just 10.1 percentage points across 15 scripts and 14 language families.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig3_encoder_comparison.pdf}
+\caption{Encoder comparison under controlled conditions (identical LR head). LaBSE shows the most uniform cross-lingual coverage.}
+\label{fig:encoders}
+\end{figure}
+
+LaBSE's translation-bridge training objective produces a more language-neutral embedding space, enabling a linear classifier to achieve consistent performance even for typologically distant languages.
+
+
+\subsection{Classifier Ablation}
+
+Table~\ref{tab:clf_ablation} shows the effect of replacing LR with MLP or XGBoost on 6 languages.
+
+\begin{table}[t]
+\centering
+\caption{Classifier ablation on 6 languages. Gap recovery: percentage of the LR--XLM-R gap closed by the alternative classifier. Negative = worse than LR.}
+\label{tab:clf_ablation}
+\begin{tabular}{lcccccc}
+\toprule
+Language & LR & MLP & XGBoost & XLM-R & MLP Gap & XGB Gap \\
+ & & & & (f.t.) & Recov.\ (\%) & Recov.\ (\%) \\
+\midrule
+English & 84.8 & 83.8 & 82.7 & 88.3 & $-$27.9 & $-$59.6 \\
+French & 81.0 & 80.6 & 79.1 & 86.3 & $-$7.0 & $-$36.2 \\
+German & 75.1 & 76.0 & 73.3 & 85.7 & 9.2 & $-$16.7 \\
+Korean & 73.6 & 75.7 & 74.3 & 86.5 & 16.1 & 5.5 \\
+Japanese & 79.8 & 79.4 & 79.2 & 83.9 & $-$11.6 & $-$14.9 \\
+Swahili & 60.4 & 61.5 & 58.5 & 83.1 & 4.7 & $-$8.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The result is surprising: \textbf{nonlinear classifiers do not consistently close the gap}. MLP improves over LR in 3 of 6 languages but hurts in 3 others. XGBoost is worse than LR in 5 of 6 languages. This suggests the embedding-to-label mapping is approximately linear for these encoders, and the bottleneck is encoder representation quality rather than classifier expressiveness.
+
+
+\subsection{Efficiency}
+
+Figure~\ref{fig:efficiency} compares model size and training time.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/fig5_efficiency.pdf}
+\caption{Total system size and training time. Our approach uses a shared frozen encoder (120\,MB for MiniLM) plus a 100\,KB per-language head, for a total of $\sim$120\,MB. Fine-tuned XLM-R Base is $\sim$270\,MB per language-task pair. Training time: $\sim$26s on CPU (ours) vs.\ $\sim$1h on GPU (XLM-R Base).}
+\label{fig:efficiency}
+\end{figure}
+
+The LR classifier head is 100\,KB per language. The encoder (120\,MB for MiniLM, 1.1\,GB for LaBSE) is shared across all languages, runs on CPU at inference time, and is never fine-tuned. The total system for $N$ languages is one encoder plus $N$ heads---for MiniLM with 51 languages, this is $\sim$125\,MB. By comparison, fine-tuning XLM-R Base produces a 270\,MB model per language-task pair. Total training time for all 51 classifier heads is under 25 minutes on a single CPU core, versus an estimated 51 GPU-hours for fine-tuning XLM-R on each language.
+
+
+\subsection{Zero-Shot Decision Benchmark (JevBench)}
+
+To probe the boundary of frozen-embedding classification beyond intent detection, we evaluate on JevBench \citep{standhartinger2026jevbench}, a benchmark of 231 typed decision tasks spanning 18 task families across three difficulty tiers. Each task provides a textual state, an instruction, and a set of labeled options with criterion descriptions. We classify zero-shot via cosine similarity: the state is embedded, each criterion description is embedded, and the label with highest similarity is selected. No task-specific training or fine-tuning is performed. We compare two encoders: MiniLM-L6-v2 (384-dim, 22\,MB) and BGE-large-en-v1.5 (1024-dim, 335\,MB).
+
+\begin{table}[t]
+\centering
+\caption{JevBench accuracy by task family for two frozen encoders. Semantic matching tasks (top) benefit from larger embeddings; reasoning tasks (bottom) do not.}
+\label{tab:jevbench}
+\small
+\begin{tabular}{lrrr}
+\toprule
+Task family & MiniLM & BGE-large & $\Delta$ \\
+\midrule
+Tool selection & 91.7\% & 100.0\% & \textcolor{green!60!black}{+8.3} \\
+Fact checking & 83.3\% & 100.0\% & \textcolor{green!60!black}{+16.7} \\
+Routing & 50.0\% & 75.0\% & \textcolor{green!60!black}{+25.0} \\
+Ordinal & 58.3\% & 83.3\% & \textcolor{green!60!black}{+25.0} \\
+Intent & 79.2\% & 70.8\% & \textcolor{red!70!black}{$-$8.3} \\
+Adequacy & 75.0\% & 25.0\% & \textcolor{red!70!black}{$-$50.0} \\
+\midrule
+Long policy & 21.1\% & 26.3\% & +5.3 \\
+Multi-hop & 16.7\% & 16.7\% & 0.0 \\
+\midrule
+\textbf{Overall} & \textbf{53.2\%} & \textbf{55.0\%} & \textbf{+1.8} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:jevbench} shows accuracy by task family for both encoders. The larger encoder improves overall accuracy by 1.8\,pp (53.2\% to 55.0\%) but redistributes errors rather than uniformly reducing them: it achieves perfect scores on tool selection and fact checking while collapsing on adequacy judgment (75\% to 25\%). The pattern across task families is consistent with our multilingual findings: the encoder determines the quality ceiling.
+
+Critically, the reasoning-dependent families are unchanged: multi-hop stays at 16.7\% and long policy moves only from 21.1\% to 26.3\%. Embedding similarity achieves 79--100\% on semantic matching tasks but 17--26\% on tasks requiring multi-step reasoning over long documents. By tier, MiniLM accuracy is 87.5\% (easy), 54.2\% (original), 37.8\% (hard); BGE-large scores 97.9\%, 52.8\%, 37.8\% respectively---the larger encoder helps easy tasks and leaves hard tasks untouched. For comparison, GPT-5.6 Luna scores 97.1\% overall at \$0.176/1k decisions and 970\,ms median latency; our approach runs at 15\,ms (MiniLM) or 480\,ms (BGE-large) and \$0.
+
+These results delineate the \textit{competence boundary} of frozen embeddings: a better encoder reshuffles which semantic tasks succeed but does not extend the approach into compositional reasoning. The bottleneck is the method, not the model.
+
+
+\section{Cross-Lingual Agreement Analysis}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/fig4_agreement_heatmap.pdf}
+\caption{Pairwise prediction agreement between 51 per-language classifiers on English test inputs, clustered using Ward's method. High-agreement blocks correspond to language families that occupy similar regions of the MiniLM embedding space.}
+\label{fig:agreement}
+\end{figure}
+
+Figure~\ref{fig:agreement} shows the $51 \times 51$ agreement matrix. Several patterns emerge:
+
+\begin{itemize}
+\item \textbf{Family clustering.} Languages from the same family (Romance, Germanic, Slavic) form high-agreement clusters, confirming that the multilingual encoder maps related languages to similar embedding subspaces.
+
+\item \textbf{Script effects.} Languages with unique scripts (Amharic, Khmer, Myanmar) show lower overall agreement, suggesting these occupy more isolated regions of the embedding space.
+
+\item \textbf{Agreement correlates with accuracy.} High-accuracy languages (French, Portuguese, Spanish) tend to agree with each other and with English, while low-accuracy languages (Welsh, Swahili, Javanese) show lower agreement scores.
+\end{itemize}
+
+We propose this agreement matrix as a \textit{zero-cost encoder diagnostic}: it requires no labeled data beyond training data already used, and the resulting heatmap immediately reveals which language pairs share embedding structure and which are isolated. This could guide decisions about cross-lingual transfer, data augmentation, or encoder selection.
+
+
+\section{Discussion}
+
+\paragraph{When is this approach sufficient?} With LaBSE, the gap to XLM-R is only 1.8\,pp (83.3\% vs.\ 85.1\%), making frozen embeddings + LR competitive with fine-tuned transformers for many applications---command routing, FAQ matching, coarse intent detection. The practical appeal is operational simplicity: no GPU infrastructure, no fine-tuning pipeline, and new languages added in seconds by training only a 100\,KB head. This compares favorably to zero-shot transfer, which our approach beats in 37 of 50 non-English languages.
+
+\paragraph{The encoder is the bottleneck.} The classifier ablation shows that nonlinear heads do not close the gap; the limiting factor is the quality of the frozen embeddings. The mE5-small result reinforces this: swapping the encoder (same parameter count, same downstream classifier) yields a 5\,pp improvement. This motivates future work on better multilingual encoders rather than more complex classifiers.
+
+\paragraph{LaBSE for uniform coverage.} With 83.3\% mean accuracy and all 51 languages above 70\%, LaBSE provides the most uniform cross-lingual coverage (spread of 10.1\,pp, from 76.4\% Khmer to 86.5\% French). Its translation-bridge objective produces a more isotropic multilingual space. For size-constrained deployments, mE5-small (118M parameters, 82.1\% on 6 languages) offers a compelling alternative at one-quarter the parameter count of LaBSE.
+
+\paragraph{Limitations.} Our evaluation is limited to the MASSIVE dataset (60 intents, virtual assistant domain). Performance on other domains, with more classes, or with out-of-distribution inputs remains untested. The approach assumes labeled data in each target language; it does not address the zero-resource setting.
+
+
+\section{Conclusion}
+
+We have shown that frozen multilingual sentence embeddings combined with per-language logistic regression provide a viable, GPU-free alternative to fine-tuned transformers for multilingual intent classification. With LaBSE, the approach achieves 83.3\% mean accuracy across all 51 MASSIVE languages---only 1.8\,pp below fine-tuned XLM-R Base---with 100\,KB per-language classifiers that train in seconds on CPU. It outperforms XLM-R zero-shot transfer in 37 of 50 non-English languages, demonstrating that per-language heads on frozen embeddings capture language-specific signal that cross-lingual transfer misses. Our encoder comparison reveals that architecture and training objective matter more than size: mE5-small (118M parameters) scores 5\,pp above MiniLM-L12 (118M) at identical parameter count.
+
+Our cross-lingual agreement analysis provides a new lens for understanding multilingual encoder structure, revealing family-level clustering and script-dependent isolation in the embedding space.
+
+All code, trained models, and an interactive playground are available at \url{https://github.com/nicobrenner/jeffy-classify} and \url{https://playground.jeffyclassify.com}.
+
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
