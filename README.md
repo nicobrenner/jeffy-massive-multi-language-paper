@@ -1,3 +1,5 @@
+> This repository is PUBLIC. Working records and anything about users belong in the private jeffy-research repo.
+
 # Frozen Multilingual Embeddings as Universal Intent Classifier Foundations
 
 *51 Languages, 100KB Per Task, No GPU Required*
